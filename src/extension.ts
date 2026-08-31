@@ -62,9 +62,13 @@ export default function sokratesMode(pi: ExtensionAPI): void {
 
   const savePlan = (next: string): void => {
     const normalized = compactText(next, MAX_PLAN_CHARS);
-    if (!normalized) return;
+    if (!normalized || normalized === plan) return;
     plan = normalized;
     pi.appendEntry("sokrates-plan", { plan });
+    pi.sendMessage(
+      { customType: "sokrates-plan-context", content: `[SOKRATES PLAN]\n${plan}`, display: false },
+      { deliverAs: "nextTurn" },
+    );
     broadcast({ type: "plan", plan });
   };
 
@@ -246,7 +250,40 @@ export default function sokratesMode(pi: ExtensionAPI): void {
     if (saved?.data?.plan) plan = compactText(saved.data.plan, MAX_PLAN_CHARS);
   });
 
-  pi.on("tool_call", (event) => {
+  // Keep at most one prior debate exchange. Normal coding turns receive only the
+  // latest accepted plan, not the repeated sparring prompts and answers.
+  pi.on("context", (event) => {
+    const requestIndexes = event.messages
+      .map((message, index) => ({ message: message as { role?: string; customType?: string }, index }))
+      .filter(({ message }) => message.role === "custom" && message.customType === "sokrates-request")
+      .map(({ index }) => index);
+    const keptRequests = new Set(active ? requestIndexes.slice(-2) : []);
+    const latestPlanContext = active
+      ? -1
+      : event.messages.findLastIndex((message) => {
+          const item = message as { role?: string; customType?: string };
+          return item.role === "custom" && item.customType === "sokrates-plan-context";
+        });
+    let suppressSegment = false;
+
+    return {
+      messages: event.messages.filter((message, index) => {
+        const item = message as { role?: string; customType?: string };
+        if (item.role === "user") suppressSegment = false;
+        if (item.role === "custom") {
+          suppressSegment = false;
+          if (item.customType === "sokrates-request") {
+            suppressSegment = !keptRequests.has(index);
+            return !suppressSegment;
+          }
+          if (item.customType === "sokrates-plan-context") return index === latestPlanContext;
+        }
+        return !suppressSegment;
+      }),
+    };
+  });
+
+  pi.on("tool_call", () => {
     if (!active) return;
     return { block: true, reason: "Sokrates mode is debate-only; tools are disabled for this response." };
   });
