@@ -8,23 +8,28 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   compactText,
+  conclusionPrompt,
   encodeMessage,
+  materialPlanKey,
   MAX_PLAN_CHARS,
   MAX_QUESTION_CHARS,
   MAX_WIRE_CHARS,
   parseReply,
+  shouldSuggestConclusion,
   sparringPrompt,
+  validateConclusion,
 } from "./protocol.js";
 
 interface ActiveRequest {
   id: string;
+  kind: "ask" | "conclude";
   latestText: string;
 }
 
-interface PlanEntry {
+interface StateEntry {
   type: string;
   customType?: string;
-  data?: { plan?: string };
+  data?: { plan?: string; planKey?: string };
 }
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
@@ -51,6 +56,7 @@ export default function sokratesMode(pi: ExtensionAPI): void {
   let clients = new Set<Socket>();
   let authenticated = new Set<Socket>();
   let active: ActiveRequest | undefined;
+  let lastSuggestedPlanKey: string | undefined;
 
   const send = (socket: Socket, message: unknown): void => {
     if (!socket.destroyed) socket.write(encodeMessage(message));
@@ -72,28 +78,32 @@ export default function sokratesMode(pi: ExtensionAPI): void {
     broadcast({ type: "plan", plan });
   };
 
-  const handleAsk = (socket: Socket, id: string, rawText: string): void => {
-    const question = compactText(rawText, MAX_QUESTION_CHARS);
-    if (!question) return send(socket, { type: "error", id, message: "Empty question" });
+  const startRequest = (socket: Socket, id: string, kind: ActiveRequest["kind"], content: string): void => {
     if (!ctx?.isIdle() || active) {
       return send(socket, { type: "error", id, message: "Pi is busy" });
     }
 
-    active = { id, latestText: "" };
-    broadcast({ type: "thinking", id });
+    active = { id, kind, latestText: "" };
+    broadcast({ type: "thinking", id, kind });
     try {
       pi.sendMessage(
-        {
-          customType: "sokrates-request",
-          content: sparringPrompt(plan, question),
-          display: false,
-        },
+        { customType: "sokrates-request", content, display: false },
         { triggerTurn: true },
       );
     } catch (error) {
       active = undefined;
       send(socket, { type: "error", id, message: error instanceof Error ? error.message : String(error) });
     }
+  };
+
+  const handleAsk = (socket: Socket, id: string, rawText: string): void => {
+    const question = compactText(rawText, MAX_QUESTION_CHARS);
+    if (!question) return send(socket, { type: "error", id, message: "Empty question" });
+    startRequest(socket, id, "ask", sparringPrompt(plan, question));
+  };
+
+  const handleConclude = (socket: Socket, id: string): void => {
+    startRequest(socket, id, "conclude", conclusionPrompt(plan));
   };
 
   const handleLine = (socket: Socket, line: string): void => {
@@ -121,6 +131,8 @@ export default function sokratesMode(pi: ExtensionAPI): void {
 
     if (message.type === "ask" && typeof message.id === "string" && typeof message.text === "string") {
       handleAsk(socket, message.id, message.text);
+    } else if (message.type === "conclude" && typeof message.id === "string") {
+      handleConclude(socket, message.id);
     } else if (message.type === "set_plan" && typeof message.plan === "string") {
       savePlan(message.plan);
     }
@@ -244,10 +256,15 @@ export default function sokratesMode(pi: ExtensionAPI): void {
 
   pi.on("session_start", (_event, eventCtx) => {
     ctx = eventCtx;
-    const saved = eventCtx.sessionManager.getEntries()
+    const entries = eventCtx.sessionManager.getEntries();
+    const saved = entries
       .filter((entry) => entry.type === "custom" && entry.customType === "sokrates-plan")
-      .at(-1) as PlanEntry | undefined;
+      .at(-1) as StateEntry | undefined;
+    const suggestion = entries
+      .filter((entry) => entry.type === "custom" && entry.customType === "sokrates-conclusion-suggestion")
+      .at(-1) as StateEntry | undefined;
     if (saved?.data?.plan) plan = compactText(saved.data.plan, MAX_PLAN_CHARS);
+    if (suggestion?.data?.planKey) lastSuggestedPlanKey = suggestion.data.planKey;
   });
 
   // Keep at most one prior debate exchange. Normal coding turns receive only the
@@ -264,6 +281,12 @@ export default function sokratesMode(pi: ExtensionAPI): void {
           const item = message as { role?: string; customType?: string };
           return item.role === "custom" && item.customType === "sokrates-plan-context";
         });
+    const latestConclusionContext = active
+      ? -1
+      : event.messages.findLastIndex((message) => {
+          const item = message as { role?: string; customType?: string };
+          return item.role === "custom" && item.customType === "sokrates-conclusion-context";
+        });
     let suppressSegment = false;
 
     return {
@@ -277,6 +300,7 @@ export default function sokratesMode(pi: ExtensionAPI): void {
             return !suppressSegment;
           }
           if (item.customType === "sokrates-plan-context") return index === latestPlanContext;
+          if (item.customType === "sokrates-conclusion-context") return index === latestConclusionContext;
         }
         return !suppressSegment;
       }),
@@ -299,8 +323,8 @@ export default function sokratesMode(pi: ExtensionAPI): void {
     const message = event.message as AssistantMessage;
     active.latestText = assistantText(message);
     const parsed = parseReply(active.latestText);
-    if (!parsed.plan) return;
-    savePlan(parsed.plan);
+    if (!parsed.plan && !parsed.suggestConclusion) return;
+    if (parsed.plan) savePlan(parsed.plan);
 
     let replaced = false;
     return {
@@ -322,7 +346,33 @@ export default function sokratesMode(pi: ExtensionAPI): void {
     active = undefined;
     const parsed = parseReply(request.latestText);
     if (parsed.plan && parsed.plan !== plan) savePlan(parsed.plan);
+
+    if (request.kind === "conclude") {
+      const validation = validateConclusion(parsed.answer, parsed.plan);
+      if (!validation.valid) {
+        broadcast({
+          type: "error",
+          id: request.id,
+          message: `Incomplete conclusion (missing: ${validation.missing.join(", ")}). Run Conclude debate again.`,
+        });
+        return;
+      }
+      const handoff = compactText(parsed.answer, MAX_PLAN_CHARS);
+      pi.appendEntry("sokrates-conclusion", { handoff, plan });
+      pi.sendMessage(
+        { customType: "sokrates-conclusion-context", content: `[SOKRATES CONCLUSION]\n${handoff}`, display: false },
+        { deliverAs: "nextTurn" },
+      );
+      broadcast({ type: "concluded", id: request.id, text: handoff, plan });
+      return;
+    }
+
     broadcast({ type: "answer", id: request.id, text: parsed.answer || "No answer." });
+    if (parsed.suggestConclusion && shouldSuggestConclusion(plan, lastSuggestedPlanKey)) {
+      lastSuggestedPlanKey = materialPlanKey(plan);
+      pi.appendEntry("sokrates-conclusion-suggestion", { planKey: lastSuggestedPlanKey });
+      broadcast({ type: "suggest_conclusion", planKey: lastSuggestedPlanKey });
+    }
   });
 
   pi.on("session_shutdown", async () => {

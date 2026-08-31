@@ -8,6 +8,8 @@ A Pi skill and extension for compact plan sparring in a separate [Herdr](https:/
 - Shows the current plan and a focused debate transcript.
 - Sends questions to that exact live Pi session over a private Unix socket.
 - Lets the model replace the plan; persists the latest plan in Pi session entries.
+- Offers a manual **Conclude debate** handoff after checking decisions, alternatives, open questions, validation, and rollback.
+- Lets the model suggest concluding when the plan is mature, without ever triggering conclusion automatically or repeating unchanged suggestions.
 - Blocks tools during sparring turns: debate cannot mutate the project.
 - Keeps prompts and replies bounded to reduce token use.
 
@@ -46,11 +48,12 @@ Inside the TUI:
 - `Enter`: send
 - `Shift+Enter`: newline
 - `/plan <replacement>`: replace the plan without an AI call
+- `/conclude` or `Ctrl+D`: manually conclude and create the structured handoff
 - `/quit` or `Ctrl+C`: close the tab
 
 ## Design
 
-The Pi extension owns an authenticated mode-`0600` Unix socket scoped to the current session. Herdr creates a tab in the caller's exact workspace and runs `dist/tui.js` there. Questions become hidden custom messages in the existing Pi session, so the same model and context answer them. A strict compact protocol allows optional full-plan replacement with `<SOKRATES_PLAN>` markers. The extension strips those markers from the persisted assistant message and stores plan state as non-context custom entries.
+The Pi extension owns an authenticated mode-`0600` Unix socket scoped to the current session. Herdr creates a tab in the caller's exact workspace and runs `dist/tui.js` there. Questions become hidden custom messages in the existing Pi session, so the same model and context answer them. A strict compact protocol allows optional full-plan replacement with `<SOKRATES_PLAN>` markers. The extension strips those markers from the persisted assistant message and stores plan state as non-context custom entries. A successful manual conclusion is validated for decisions, rejected alternatives, unresolved questions, the complete revised plan, and scope/constraints/acceptance criteria/tests/rollback coverage, then queued as context for the next coding turn.
 
 Only one sparring request is accepted at a time, and requests are rejected while Pi is busy. This avoids turn interleaving and accidental interference with coding work.
 

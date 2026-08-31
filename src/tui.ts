@@ -112,7 +112,7 @@ function render(): void {
     return `${label}\n\n${safe(item.text) || ansi.dim("…")}`;
   }).join("\n\n---\n\n");
   chatView.setText(transcript || "Ask a question to start.");
-  statusView.setText(`${status === "thinking" ? ansi.warning("thinking") : ansi.muted(status)}  ${ansi.dim("Enter ask · Shift+Enter newline · /plan replacement · Ctrl+C close")}`);
+  statusView.setText(`${status === "thinking" ? ansi.warning("thinking") : ansi.muted(status)}  ${ansi.dim("Enter ask · Ctrl+D or /conclude · /plan replacement · Ctrl+C close")}`);
   tui.requestRender();
   if (status === "thinking") chatScroll.scrollToEnd();
 }
@@ -128,6 +128,16 @@ function finish(): void {
 const socket = connect(socketPath);
 socket.setEncoding("utf8");
 let buffer = "";
+
+function requestConclusion(): void {
+  if (pendingId || status === "connecting" || status === "requesting conclusion" || closed) return;
+  const id = randomUUID();
+  chat.push({ id, role: "you", text: "Conclude debate" });
+  status = "requesting conclusion";
+  editor.disableSubmit = true;
+  socket.write(encodeMessage({ type: "conclude", id }));
+  render();
+}
 
 socket.on("connect", () => socket.write(encodeMessage({ type: "auth", token })));
 socket.on("data", (chunk: string) => {
@@ -164,6 +174,20 @@ socket.on("data", (chunk: string) => {
       pendingId = undefined;
       status = "ready";
       editor.disableSubmit = false;
+    } else if (message.type === "concluded" && message.id === pendingId && typeof message.text === "string") {
+      const item = chat.findLast((entry) => entry.id === pendingId && entry.role === "pi");
+      if (item) item.text = message.text;
+      if (typeof message.plan === "string") plan = message.plan;
+      pendingId = undefined;
+      status = "concluded · handoff ready";
+      editor.disableSubmit = false;
+    } else if (message.type === "suggest_conclusion" && typeof message.planKey === "string") {
+      chat.push({
+        id: `suggest:${message.planKey}`,
+        role: "pi",
+        text: "The plan appears coherent, with risks addressed and open questions explicit. You can run **Conclude debate** when ready.",
+      });
+      status = "ready · conclusion suggested";
     } else if (message.type === "error") {
       if (message.id === pendingId) {
         chat = chat.filter((entry) => !(entry.id === pendingId && entry.role === "pi"));
@@ -191,6 +215,7 @@ editor.onSubmit = (raw) => {
   if (!text) return;
   editor.setText("");
   if (text === "/q" || text === "/quit") return finish();
+  if (text === "/conclude") return requestConclusion();
   if (text.startsWith("/plan ")) {
     plan = text.slice(6).trim();
     socket.write(encodeMessage({ type: "set_plan", plan }));
@@ -207,6 +232,10 @@ editor.onSubmit = (raw) => {
 tui.addInputListener((data) => {
   if (matchesKey(data, "ctrl+c")) {
     finish();
+    return { consume: true };
+  }
+  if (matchesKey(data, "ctrl+d")) {
+    requestConclusion();
     return { consume: true };
   }
   return undefined;
