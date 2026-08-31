@@ -168,9 +168,9 @@ export default function sokratesMode(pi: ExtensionAPI): void {
 
   const launchHerdr = async (): Promise<void> => {
     if (process.env.HERDR_ENV !== "1") throw new Error("Sokrates mode requires Pi to run inside Herdr");
-    const session = process.env.HERDR_SESSION;
+    const session = process.env.HERDR_SESSION || "default";
     const workspace = process.env.HERDR_WORKSPACE_ID;
-    if (!session || !workspace) throw new Error("Herdr session/workspace identity is unavailable");
+    if (!workspace) throw new Error("Herdr workspace identity is unavailable");
 
     if (herdrTabId) {
       const existing = await pi.exec("herdr", ["tab", "get", herdrTabId, "--session", session]);
