@@ -38,6 +38,18 @@ test("parseReply extracts a manual conclusion suggestion", () => {
   );
 });
 
+test("conclusion plans appear once in the handoff", () => {
+  const reply = parseReply([
+    "## Revised plan",
+    "<SOKRATES_CONCLUSION_PLAN># Plan\n- Implement once</SOKRATES_CONCLUSION_PLAN>",
+    "## Validation and handoff",
+    "Checked.",
+  ].join("\n\n"));
+  assert.equal(reply.plan, "# Plan\n- Implement once");
+  assert.match(reply.answer, /## Revised plan[\s\S]*# Plan/);
+  assert.doesNotMatch(reply.answer, /SOKRATES_CONCLUSION_PLAN/);
+});
+
 test("conclusion suggestions are suppressed until plan content changes", () => {
   const plan = "# Plan\n- Add tests";
   const key = materialPlanKey(plan);

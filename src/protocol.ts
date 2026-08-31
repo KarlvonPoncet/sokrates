@@ -14,6 +14,7 @@ export interface ConclusionValidation {
 }
 
 const PLAN_BLOCK = /\n?<SOKRATES_PLAN>\s*([\s\S]*?)\s*<\/SOKRATES_PLAN>\s*/i;
+const CONCLUSION_PLAN_BLOCK = /\n?<SOKRATES_CONCLUSION_PLAN>\s*([\s\S]*?)\s*<\/SOKRATES_CONCLUSION_PLAN>\s*/i;
 const SUGGEST_CONCLUSION = /\n?<SOKRATES_SUGGEST_CONCLUSION\s*\/>\s*/gi;
 const CONCLUSION_SECTIONS = [
   "Decisions",
@@ -33,14 +34,14 @@ export function parseReply(text: string): ParsedReply {
   const suggestConclusion = SUGGEST_CONCLUSION.test(text);
   SUGGEST_CONCLUSION.lastIndex = 0;
   const withoutSuggestion = text.replace(SUGGEST_CONCLUSION, "\n");
+  const conclusionMatch = CONCLUSION_PLAN_BLOCK.exec(withoutSuggestion);
   const match = PLAN_BLOCK.exec(withoutSuggestion);
-  if (!match) return { answer: withoutSuggestion.trim(), suggestConclusion };
-  const plan = compactText(match[1] ?? "", MAX_PLAN_CHARS);
-  return {
-    answer: withoutSuggestion.replace(PLAN_BLOCK, "\n").trim(),
-    ...(plan ? { plan } : {}),
-    suggestConclusion,
-  };
+  const plan = compactText(conclusionMatch?.[1] ?? match?.[1] ?? "", MAX_PLAN_CHARS);
+  if (!plan) return { answer: withoutSuggestion.trim(), suggestConclusion };
+  const answer = conclusionMatch
+    ? withoutSuggestion.replace(CONCLUSION_PLAN_BLOCK, (_, body: string) => `\n${body}\n`)
+    : withoutSuggestion.replace(PLAN_BLOCK, "\n");
+  return { answer: answer.trim(), plan, suggestConclusion };
 }
 
 export function materialPlanKey(plan: string): string {
@@ -85,7 +86,7 @@ export function sparringPrompt(plan: string, question: string): string {
 }
 
 export function conclusionPrompt(plan: string): string {
-  return `[SOKRATES CONCLUDE]\nThe user manually chose Conclude debate. Do not call tools or implement. Produce a self-contained handoff in Markdown with exactly these headings:\n## Decisions\n## Rejected alternatives\n## Unresolved questions\n## Revised plan\n## Validation and handoff\n\nRetain prior decisions and rejected options. Under Validation and handoff explicitly verify scope, constraints, acceptance criteria, tests, and rollback; mark missing information as unresolved rather than inventing it. Include the complete revised plan under Revised plan, then append that same complete plan inside <SOKRATES_PLAN>...</SOKRATES_PLAN>. Do not emit <SOKRATES_SUGGEST_CONCLUSION/>.\n\nCurrent plan:\n${compactText(plan, MAX_PLAN_CHARS)}`;
+  return `[SOKRATES CONCLUDE]\nThe user manually chose Conclude debate. Do not call tools or implement. Produce a self-contained handoff in Markdown with exactly these headings:\n## Decisions\n## Rejected alternatives\n## Unresolved questions\n## Revised plan\n## Validation and handoff\n\nRetain prior decisions and rejected options. Under Validation and handoff explicitly verify scope, constraints, acceptance criteria, tests, and rollback; mark missing information as unresolved rather than inventing it. Put the complete revised plan under Revised plan, wrapped once in <SOKRATES_CONCLUSION_PLAN>...</SOKRATES_CONCLUSION_PLAN>. Do not repeat the plan elsewhere and do not emit <SOKRATES_SUGGEST_CONCLUSION/>.\n\nCurrent plan:\n${compactText(plan, MAX_PLAN_CHARS)}`;
 }
 
 export function encodeMessage(value: unknown): string {
